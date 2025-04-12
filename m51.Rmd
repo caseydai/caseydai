@@ -1,0 +1,175 @@
+---
+title: "INLA m51"
+output: html_notebook
+4 Break Epidemic Period 3: 2019-03-25 to 2019-06-24
+---
+
+#libraries 
+```{r}
+library(sp)
+library(spdep)
+library(sf)
+library(raster)
+library(spacetime)
+library(data.table)
+library(INLA)
+library(dplyr)
+library(splines)
+library(foreign)
+```
+
+#read in full cleaned dengue INLA dataset 
+```{r}
+full_dengue_dt <- fread(file="~/Desktop/GHP299/GHP299Directory/INLA_dengue_data_03312025.csv")
+data.table(full_dengue_dt)
+```
+
+#make sure variable in dataset matches shape file (ID_BAIRRO = COD_BAIRRO)
+```{r}
+setnames(full_dengue_dt, old = "ID_BAIRRO", new = "CodBairro")
+names(full_dengue_dt)
+glimpse(full_dengue_dt)
+```
+
+#read in shape file 
+```{r}
+bairros = st_read("~/Desktop/GHP299/GHP299Directory/BAIRROS_NOISLAS.shp")
+names(bairros)
+```
+
+#subset the shape file to only have the bairros and geometry 
+#shape file that only has bairros shape file and geom 
+```{r}
+bairros2 <- subset(bairros,select="CodBairro")
+names(bairros2)
+```
+
+#Set unique row names to the name of the bairro 
+```{r}
+row.names(bairros2) <- bairros2$bairro
+```
+
+#Create the spatial bairros neighborhood matrix
+```{r}
+temp <- poly2nb(as(bairros2, "Spatial"), row.names = bairros2$bairro)
+```
+
+#Turn neighbourhood matrix into INLA object 
+```{r}
+nb2INLA("bairro.graph", temp)
+bairro.adj <- paste(getwd(),"/bairro.graph",sep="")
+```
+
+#plots the matrix, looks like a correlation plot of neighbours 
+#sanity check, did shp read in correctly? 
+```{r}
+H <- inla.read.graph(filename="bairro.graph")
+image(inla.graph2matrix(H),xlab="",ylab="")
+```
+
+# if random effect of bairro + spatial effect of bairro, need identical variables for inla to run 
+```{r}
+bairros_unique <- as.data.frame(unique(full_dengue_dt$BAIRRO_NAME)) #each unique bairro, list of names 
+bairros_unique$CodBairro_correct <- 1:157 #each bairro in RJ gets an unique number (1-157)
+colnames(bairros_unique)[1] <- "BAIRRO_NAME" #bairro of exposure
+full_dengue_dt <- merge(full_dengue_dt,bairros_unique,by="BAIRRO_NAME",all.x=T) #merge into full dt
+full_dengue_dt$bairro.1 <- full_dengue_dt$CodBairro_correct #bairro.1 filler variables for unique 
+full_dengue_dt$bairro.2 <- full_dengue_dt$CodBairro_correct #bairro.2
+glimpse(full_dengue_dt)
+```
+
+```{r}
+set.seed(324)
+```
+
+#every time you run a Bayesian model, it is an estimation --> setting a seed is more consistent in outcome 
+# or run the model with more iterations, lower model tolerance 
+
+```{r}
+names(full_dengue_dt)
+# Convert date column to Date type (if not already done)
+full_dengue_dt$date <- as.Date(full_dengue_dt$DATE)
+
+# Define the start and end dates for 4 Break Epidemic Period 3: 2019-03-25 to 2019-06-24
+start_date <- as.Date("2019-03-25")
+end_date <- as.Date("2019-06-24")
+
+# Subset the dataset for dates within the specified range
+four_epidemics_period <- subset(full_dengue_dt, DATE >= start_date & DATE <= end_date)
+
+# Print the subsetted data
+print(four_epidemics_period)
+```
+##########################################################################################
+  
+#run m51
+```{r}
+m51 <- CASES ~ 1 + #dengue cases 
+  POP_BAIRROS +  
+  POP_FAVELAS + 
+  AREA_BAIRRO + 
+  AREA_FAVELA + 
+  POP_DENSITY_BAIRRO + 
+  POP_DENSITY_FAVELA + 
+  MB_Favela_112_Urban_PC + 
+  MB_NON_Favela_117_Urban_PC +
+  MB_Favela_VEGETATED_PC + 
+  MB_NON_Favela_VEGETATED_PC + 
+  POP_FAVELA_PC + 
+  WOLBACHIA_PROGRAM + 
+  as.factor(EPI_WEEK) + #week fixed effect 
+  as.factor(MONTH) + #month fixed effect
+  as.factor(YEAR) + #year fixed effect 
+  f(ONI, model="ar", order = 2) + #ONI second order autoregressive
+  f(inla.group(LST_Day_1km), model="ar1") + #temp, first order autoregressive
+  f(inla.group(TOT_PRECIP_SUM), model ="ar1") + #rain, first order autoregressive
+  f(bairro.1, model = "bym", graph = bairro.adj, scale.model = TRUE, param=c(0.001, 0.001)) + #spatial effects, weakly informative parameter
+  f(bairro.2, model =  "iid", param=c(0.001, 0.001)) #random effects of neighbourhood
+```
+
+#m51 Results 
+```{r}
+m51_results <- inla(m51, family="zeroinflatednbinomial1", data=full_dengue_dt, #specify the distributional assumption of the outcome; count of cases 
+                   control.predictor = list(compute = TRUE, link = 1),
+                   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, config = TRUE), #dic, waic, cpo, config are model selection criteria, allow to determine which model has the best fit when comparing 
+                   control.inla = list(tolerance = 0.01), #while testing: 0.01 #sets how specific do you want the model when calcuating posterior; strict expectation for model to calculate posterior; makes then model to run a long time 
+                   verbose = TRUE, safe = TRUE) #verbose=T, give me the output of each calculation done; safe=T, allows the algo to exit/restart if haywire! 
+
+m51_results$summary.fitted.values #model predicting outcome 
+
+m51_results_summary <- exp(m51_results$summary.fixed) #have to exp coefficient, B output is distribution -> 5th and 95th percentile of distribution credible intervals; RR is median of distribution
+m51_results_summary
+```
+
+##########################################################################################
+
+#Export
+```{r}
+# Create a timestamp
+timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+# Generate the filename with the timestamp
+filename <- paste0("FULL_m51_output_", timestamp, ".csv")
+
+# Write the model summary to a CSV file with the new filename
+write.csv(m51_results_summary, file=filename)
+```
+
+```{r}
+#model fit stats 
+#dic
+model_dic <- m51_results$dic$dic
+
+
+#waic
+model_waic <- m51_results$waic$waic
+
+#cpo 
+model_cpo_values <- m51_results$cpo$cpo
+lcpo_values <- log(model_cpo_values)
+sum_lcpo <- sum(lcpo_values)
+
+print(paste("Model DIC:", model_dic))
+print(paste("Model WAIC:", model_waic))
+print(paste("Sum of LCPO:", sum_lcpo))
+```
